@@ -103,6 +103,116 @@ HLOOLMAIL_DATABASE_URL=postgres://user:password@db.example.com:5432/hloolmail?ss
 docker compose up -d --no-deps app
 ```
 
+## DCDeploy / 无持久化卷容器平台部署
+
+适用于 DCDeploy、Railway、Render、Fly.io 等**不支持配置本地卷路径**的容器平台。
+
+与标准 Docker Compose 部署的核心区别：不依赖 `app-storage` 本地卷，所有密钥和配置通过环境变量注入，安装向导检测到密钥已预设后会自动跳过写文件步骤。
+
+### 前置条件
+
+- 一个外部托管 PostgreSQL 实例（推荐 Neon，也支持 Supabase、阿里云 RDS 等）
+- 能在 DCDeploy 控制台为应用配置环境变量
+
+### 获取 Neon 数据库连接串
+
+推荐使用 [Neon](https://console.neon.tech)，免费计划即可满足初期使用需求。
+
+1. 登录 [console.neon.tech](https://console.neon.tech)，创建或进入已有项目
+2. 左侧菜单点击 **Connection Details**
+3. 在右侧面板中切换到 **Pooled connection**（推荐，减少并发连接消耗）
+4. 复制 **Connection string** 完整内容，格式如下：
+   ```
+   postgres://用户名:密码@ep-xxx-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require
+   ```
+5. 将此连接串填入下方 `HLOOLMAIL_DATABASE_URL` 变量
+
+> **注意**：Neon 免费版最大并发连接数为 25，与应用默认连接池大小（`DB_MAX_OPEN_CONNS=25`）一致，无需额外调整。若使用付费版 Pooler，可适当调大。
+
+### 部署步骤
+
+**第一步：生成密钥**
+
+在本地终端执行两次，分别生成 `SESSION_SECRET` 和 `INBOX_TOKEN_SECRET`：
+
+```bash
+openssl rand -base64 32
+```
+
+两个值必须不同，生成后妥善保存，后续不能修改（否则所有登录态和收件箱 Token 失效）。
+
+**第二步：在 DCDeploy 配置环境变量**
+
+参考 `.env.dcdeploy.example`，将以下变量填入 DCDeploy 控制台的环境变量面板：
+
+| 变量 | 说明 | 示例 |
+|------|------|------|
+| `PUBLIC_BASE_URL` | 应用对外访问地址 | `https://mail.example.com` |
+| `MAIL_HOSTNAME` | 收信域名（MX 指向） | `mail.example.com` |
+| `EXPECTED_MX` | MX 期望值 | `mail.example.com` |
+| `HLOOLMAIL_DATABASE_URL` | 外部 PostgreSQL 连接串 | `postgres://user:pass@host:5432/db?sslmode=require` |
+| `SESSION_SECRET` | Session 密钥（第一步生成）| `base64随机字符串` |
+| `INBOX_TOKEN_SECRET` | 收件箱 Token 密钥（第一步生成）| `另一个base64随机字符串` |
+| `HLOOLMAIL_CONFIG_LOCKED` | 锁定运行时配置 | `true` |
+| `HLOOLMAIL_DEPLOYMENT` | 部署类型标识 | `docker` |
+| `CONFIG_ENV_PATH` | 兼容占位，无实际持久化 | `/tmp/.env` |
+
+**第三步：构建镜像**
+
+使用专用的 `Dockerfile.dcdeploy` 构建镜像，该文件已默认设置 `DATABASE_DRIVER=postgres`，移除了 `/app/storage` 本地目录创建，并内置了 `ca-certificates` 以支持 PostgreSQL TLS 连接：
+
+```bash
+docker build -f Dockerfile.dcdeploy -t hloolmail:latest .
+```
+
+推送到你的镜像仓库（如 Docker Hub、阿里云 ACR、GHCR 等）：
+
+```bash
+docker tag hloolmail:latest your-registry/hloolmail:latest
+docker push your-registry/hloolmail:latest
+```
+
+在 CI/CD 中构建时可注入版本信息：
+
+```bash
+docker build -f Dockerfile.dcdeploy \
+  --build-arg VERSION=1.0.0 \
+  --build-arg COMMIT=$(git rev-parse --short HEAD) \
+  --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  -t your-registry/hloolmail:1.0.0 .
+```
+
+**第四步：在 DCDeploy 配置镜像**
+
+在 DCDeploy 控制台中，使用 `docker-compose.dcdeploy.yml` 作为启动配置，并将 `image` 字段替换为你的镜像地址（该文件已移除所有本地卷挂载和内置 postgres 服务）。
+
+**第五步：完成安装**
+
+应用启动后访问 `https://your-domain/install`，填写管理员账号信息。
+
+由于 `SESSION_SECRET` 和 `INBOX_TOKEN_SECRET` 已通过环境变量预设，安装向导会自动检测到并跳过写文件步骤，直接完成安装。刷新页面后���正常登录。
+
+### 关键说明
+
+- **容器重启数据不丢失**：所有业务数据存储在外部 PostgreSQL，密钥来自环境变量，容器无状态，重启无影响。
+- **不要在安装后修改密钥**：`SESSION_SECRET` 和 `INBOX_TOKEN_SECRET` 一旦设定后修改，所有已登录用户的 session 和 API Token 都会失效。
+- **SMTP 端口**：DCDeploy 需要开放容器端口 2525（或 25）用于接收邮件。如平台仅支持 HTTP 流量，则 SMTP 功能无法正常工作，需要单独配置 TCP 端口。
+- **日志查看**：应用日志全部输出到 stdout，在 DCDeploy 控制台的日志面板中实时查看。
+
+### Troubleshooting
+
+**安装后刷新提示"未安装"**
+
+检查 `SESSION_SECRET` 和 `INBOX_TOKEN_SECRET` 是否已正确填入，且两个值均不少于 16 位。如填写后仍有问题，删除 admin ���户记录，重新走安装流程。
+
+**数据库连接失败**
+
+确认 `HLOOLMAIL_DATABASE_URL` 格式正确，PostgreSQL 实例允许来自 DCDeploy IP 的连接，以及 `sslmode=require` 与你的数据库配置一致。
+
+**收不到邮件**
+
+检查 DCDeploy 是否开放了 SMTP 端口（2525 或 25）的 TCP 入站流量，以及 DNS MX 记录是否已指向应用的公网地址。
+
 ## Release 二进制
 
 Release 包会把前端静态资源内嵌进后端二进制。下载对应平台的包后，不需要单独携带 `web/dist`，程序会直接托管 Web Console。
@@ -264,7 +374,7 @@ API 自动化使用 `X-API-Key` 请求头。当前稳定面向脚本和 AI 的�
 
 API Key 与所属账号绑定；普通 API 自动化只读取和操作该账号有权访问的数据，不提供跨用户管理能力。
 
-HLOOL Mail 是开源项目，可以部署在你自己的域名或内网环境中。示例里的 `BASE_URL` 不是固定官方 API 地址，请替换为你的 HLOOL Mail 实例地址，例如 `https://your-hlool-mail.example`。
+HLOOL Mail 是开源项目，可以部署在你自己的域名或内网环境中。示例��的 `BASE_URL` 不是固定官方 API 地址，请替换为你的 HLOOL Mail 实例地址，例如 `https://your-hlool-mail.example`。
 
 <p align="center">
   <img src="assets/readme-alan-sheep/05-automation-delivery.png" width="820" alt="API Key 自动化读取邮件和事件投递插图">

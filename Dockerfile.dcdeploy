@@ -1,0 +1,123 @@
+# =============================================================================
+# Dockerfile.dcdeploy — 适用于 DCDeploy 及无持久化卷容器平台
+#
+# 与标准 Dockerfile 的主要区别：
+#   1. 默认数据库驱动改为 postgres（无 SQLite 默认路径）
+#   2. 不创建 /app/storage 本地目录（无需挂卷）
+#   3. 移除 CONFIG_ENV_PATH 默认值（密钥通过环境变量注入，无需写文件）
+#   4. 容器完全无状态，重启不丢任何数据
+#
+# 构建方式：
+#   docker build -f Dockerfile.dcdeploy -t hloolmail:latest .
+#
+# 所有运行时配置通过 DCDeploy 控制台的环境变量面板注入。
+# 参考 .env.dcdeploy.example 了解完整的变量清单和说明。
+# =============================================================================
+
+# ─────────────────────────────────────────────────
+# Stage 1: 构建前端（React + Vite）
+# ─────────────────────────────────────────────────
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web
+
+WORKDIR /app/web
+
+# 支持自定义 npm 镜像源（国内可设置为淘宝源）
+ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
+ENV NPM_CONFIG_REGISTRY=$NPM_CONFIG_REGISTRY
+
+COPY web/package.json web/package-lock.json ./
+COPY web/scripts ./scripts
+RUN npm ci
+RUN node scripts/install-native-build-deps.cjs
+
+COPY web ./
+RUN npm run build
+
+# ─────────────────────────────────────────────────
+# Stage 2: 编译 Go 后端
+# ─────────────────────────────────────────────────
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS api
+
+WORKDIR /src
+
+ARG TARGETOS
+ARG TARGETARCH
+
+# 支持自定义 Go 代理（国内可设置为 goproxy.cn）
+ARG GOPROXY=https://proxy.golang.org|https://goproxy.cn|direct
+ENV GOPROXY=$GOPROXY
+
+# 先复制依赖文件，利用 Docker 层缓存加速重复构建
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . ./
+
+# 将前端构建产物嵌入 Go 二进制
+COPY --from=web /app/web/dist ./internal/frontend/dist
+
+# 构建版本信息（由 CI/CD 注入，默认 dev）
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
+RUN CGO_ENABLED=0 \
+    GOOS=${TARGETOS:-linux} \
+    GOARCH=${TARGETARCH:-amd64} \
+    go build \
+      -tags embed_frontend \
+      -trimpath \
+      -ldflags="-s -w \
+        -X gptmail/internal/version.Version=${VERSION} \
+        -X gptmail/internal/version.Commit=${COMMIT} \
+        -X gptmail/internal/version.BuildTime=${BUILD_TIME}" \
+      -o /out/hloolmail \
+      ./cmd/server
+
+# ─────────────────────────────────────────────────
+# Stage 3: 最终运行镜像（最小化，无状态）
+# ─────────────────────────────────────────────────
+FROM alpine:3.21
+
+# 安装 wget（用于健康检查）和 ca-certificates（用于 PostgreSQL TLS 连接）
+RUN apk add --no-cache ca-certificates wget
+
+RUN adduser -D -u 10001 app
+
+WORKDIR /app
+
+COPY --from=api /out/hloolmail /usr/local/bin/hloolmail
+
+# 注意：不创建 /app/storage 目录，不挂载本地卷
+# 所有持久化数据存储在外部 PostgreSQL，密钥通过环境变量注入
+
+USER app
+
+# ─────────────────────────────────────────────────
+# 默认环境变量
+#
+# 以下为 DCDeploy 无持久化卷部署的默认值。
+# 所有变量均应在 DCDeploy 控制台覆盖，参考 .env.dcdeploy.example。
+#
+# 【必须在 DCDeploy 控制台覆盖的变量】
+#   PUBLIC_BASE_URL       应用对外访问地址，如 https://mail.example.com
+#   MAIL_HOSTNAME         收信域名，如 mail.example.com
+#   EXPECTED_MX           MX 期望值，如 mail.example.com
+#   HLOOLMAIL_DATABASE_URL  外部 PostgreSQL 连接串
+#   SESSION_SECRET        Session 密钥（openssl rand -base64 32）
+#   INBOX_TOKEN_SECRET    收件箱 Token 密钥（openssl rand -base64 32）
+# ─────────────────────────────────────────────────
+ENV HTTP_ADDR=:3000 \
+    SMTP_ADDR=:2525 \
+    HLOOLMAIL_DEPLOYMENT=docker \
+    DATABASE_DRIVER=postgres \
+    HLOOLMAIL_CONFIG_LOCKED=true \
+    GIN_MODE=release
+
+# HTTP（Web Console + API）和 SMTP 收信端口
+EXPOSE 3000 2525
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:3000/api/health || exit 1
+
+CMD ["hloolmail"]

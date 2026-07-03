@@ -5,6 +5,7 @@ storage/
 .env.*
 !.env.example
 !.env.compose.example
+!.env.dcdeploy.example
 
 # Frontend dependencies and build output
 web/dist/

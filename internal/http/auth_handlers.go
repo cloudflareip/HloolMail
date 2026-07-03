@@ -129,10 +129,18 @@ func (h *Handler) install(c *gin.Context) {
 		targetDB = db
 	}
 
-	envContent := buildEnvFileContent(input)
-	if err := writeEnvFile(h.Config.EnvPath, envContent); err != nil {
-		fail(c, http.StatusInternalServerError, "write env file: "+err.Error())
-		return
+	// 当 SESSION_SECRET 和 INBOX_TOKEN_SECRET 已通过环境变量预设时（无持久化卷部署，如 DCDeploy），
+	// 跳过写文件步骤，直接在内存中完成安装，避免依赖本地文件系统卷。
+	envWritten := false
+	envError := ""
+	secretsPreset := secretsPresetViaEnv()
+	if !secretsPreset {
+		envContent := buildEnvFileContent(input)
+		if err := writeEnvFile(h.Config.EnvPath, envContent); err != nil {
+			fail(c, http.StatusInternalServerError, "write env file: "+err.Error())
+			return
+		}
+		envWritten = true
 	}
 
 	hash, err := auth.HashSecret(input.AdminPassword)
@@ -166,11 +174,12 @@ func (h *Handler) install(c *gin.Context) {
 	response := gin.H{
 		"installed":          true,
 		"restart_required":   restartRequired,
-		"env_written":        true,
-		"env_error":          "",
+		"env_written":        envWritten,
+		"env_error":          envError,
 		"env_path":           h.Config.EnvPath,
 		"deployment_kind":    deploymentKind(),
 		"config_lock_reason": configLockReason(h.installRuntimeConfigLocked()),
+		"secrets_preset":     secretsPreset,
 	}
 	ok(c, response)
 }
@@ -1048,6 +1057,15 @@ func runInstallMXCheck(ctx context.Context, checker appdomain.DNSChecker, host, 
 	options := appdomain.DefaultCheckOptions()
 	options.StrictMX = checker.Config.MXStrict
 	return runner.CheckMX(ctx, host, expectedMX, options)
+}
+
+// secretsPresetViaEnv 检测 SESSION_SECRET 和 INBOX_TOKEN_SECRET 是否已通过环境变量注入。
+// 在无持久化卷的容器环境（如 DCDeploy）中，应在启动前通过环境变量预设这两个密钥，
+// 此时安装向导无需写入本地 .env 文件即可完成安装。
+func secretsPresetViaEnv() bool {
+	session := strings.TrimSpace(os.Getenv("SESSION_SECRET"))
+	inbox := strings.TrimSpace(os.Getenv("INBOX_TOKEN_SECRET"))
+	return !config.IsInsecureSecret(session) && !config.IsInsecureSecret(inbox)
 }
 
 func buildEnvFileContent(input installInput) string {
