@@ -1,0 +1,91 @@
+# DCDeploy / 无持久化卷容器平台专用 Compose 文件
+#
+# 适用场景：
+#   - DCDeploy、Railway、Render、Fly.io 等不支持配置本地卷路径的容器平台
+#   - 数据库使用外部托管 PostgreSQL（如 Supabase、Neon、阿里云 RDS 等）
+#   - SESSION_SECRET / INBOX_TOKEN_SECRET 通过环境变量预设，无需写入本地 .env
+#
+# 使用方式：
+#   1. 复制 .env.dcdeploy.example 为 .env，填写所有必填变量
+#   2. 在 DCDeploy 控制台创建应用，选择此 Compose 文件
+#   3. 将 .env 中的变量逐一填入 DCDeploy 的环境变量配置面板
+#   4. 启动应用，访问 /install 完成初始化（无需手动操作数据库卷）
+#
+# 与标准 docker-compose.yml 的区别：
+#   - 移除了 app-storage 卷（安装写文件已改为环境变量模式）
+#   - 移除了 postgres 服务（使用外部托管数据库）
+#   - 移除了 volumes 块
+#   - CONFIG_ENV_PATH 设为 /tmp/.env（仅用于兼容，实际密钥来自环境变量）
+
+name: hloolmail
+
+services:
+  app:
+    image: ${HLOOLMAIL_IMAGE:-ghcr.io/hloolx/hloolmail:latest}
+    build:
+      context: .
+      args:
+        GOPROXY: "${GOPROXY:-https://proxy.golang.org|https://goproxy.cn|direct}"
+        NPM_CONFIG_REGISTRY: "${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org/}"
+    ports:
+      - "${HTTP_PORT:-3000}:3000"
+      - "${SMTP_PORT:-2525}:2525"
+    environment:
+      HTTP_ADDR: ":3000"
+      SMTP_ADDR: ":2525"
+      HLOOLMAIL_DEPLOYMENT: "docker"
+      # 设为 true 锁定运行时配置，防止安装向导覆盖环境变量注入的值
+      HLOOLMAIL_CONFIG_LOCKED: "true"
+
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL}"
+      PUBLIC_INDEXING: "${PUBLIC_INDEXING:-landing}"
+      MAIL_HOSTNAME: "${MAIL_HOSTNAME}"
+      EXPECTED_MX: "${EXPECTED_MX}"
+      MX_STRICT: "${MX_STRICT:-false}"
+
+      # 必须指向外部托管 PostgreSQL，不得使用 SQLite
+      DATABASE_DRIVER: "postgres"
+      DATABASE_URL: "${HLOOLMAIL_DATABASE_URL}"
+      DB_MAX_OPEN_CONNS: "${DB_MAX_OPEN_CONNS:-25}"
+      DB_MAX_IDLE_CONNS: "${DB_MAX_IDLE_CONNS:-5}"
+
+      # 密钥必须预设，否则容器重启后安装状态失效
+      # 生成方式：openssl rand -base64 32
+      SESSION_SECRET: "${SESSION_SECRET}"
+      INBOX_TOKEN_SECRET: "${INBOX_TOKEN_SECRET}"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:-}"
+      ALLOW_LEGACY_ADMIN_TOKEN: "${ALLOW_LEGACY_ADMIN_TOKEN:-false}"
+
+      # 写入目标设为 /tmp（无持久化卷时仅作兼容占位，实际密钥来自上方环境变量）
+      CONFIG_ENV_PATH: "/tmp/.env"
+
+      FRONTEND_DIST: "${HLOOLMAIL_FRONTEND_DIST:-}"
+      MESSAGE_RETENTION_HOURS: "${MESSAGE_RETENTION_HOURS:-24}"
+      AUDIT_LOG_RETENTION_DAYS: "${AUDIT_LOG_RETENTION_DAYS:-180}"
+      AUDIT_ACTIVITY_RETENTION_DAYS: "${AUDIT_ACTIVITY_RETENTION_DAYS:-30}"
+      METRICS_ENABLED: "${METRICS_ENABLED:-false}"
+      WEBHOOKS_ENABLED: "${WEBHOOKS_ENABLED:-true}"
+      DISABLE_PENDING_DOMAIN_DATA_PROTECTION: "${DISABLE_PENDING_DOMAIN_DATA_PROTECTION:-false}"
+      MAX_MESSAGE_BYTES: "${MAX_MESSAGE_BYTES:-10485760}"
+      MAX_ATTACHMENT_BYTES: "${MAX_ATTACHMENT_BYTES:-10485760}"
+      DEV_MODE: "${DEV_MODE:-false}"
+      API_KEY_DEFAULT_DAILY_LIMIT: "${API_KEY_DEFAULT_DAILY_LIMIT:-200000}"
+      ALLOW_API_KEY_QUERY_PARAM: "${ALLOW_API_KEY_QUERY_PARAM:-false}"
+
+      GITHUB_OAUTH_CLIENT_ID: "${GITHUB_OAUTH_CLIENT_ID:-}"
+      GITHUB_OAUTH_CLIENT_SECRET: "${GITHUB_OAUTH_CLIENT_SECRET:-}"
+      GITHUB_OAUTH_REDIRECT_URL: "${GITHUB_OAUTH_REDIRECT_URL:-}"
+      GITHUB_OAUTH_ENABLED: "${GITHUB_OAUTH_ENABLED:-false}"
+
+      LINUXDO_OAUTH_CLIENT_ID: "${LINUXDO_OAUTH_CLIENT_ID:-}"
+      LINUXDO_OAUTH_CLIENT_SECRET: "${LINUXDO_OAUTH_CLIENT_SECRET:-}"
+      LINUXDO_OAUTH_REDIRECT_URL: "${LINUXDO_OAUTH_REDIRECT_URL:-}"
+      LINUXDO_OAUTH_ENABLED: "${LINUXDO_OAUTH_ENABLED:-false}"
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
