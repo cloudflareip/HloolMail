@@ -49,8 +49,12 @@ services:
       MX_STRICT: "${MX_STRICT:-false}"
 
       # 必须指向外部托管 PostgreSQL，不得使用 SQLite
+      # 连接串从 Neon 控制台获取：https://console.neon.tech → Connection Details → Connection string
+      # 支持 HLOOLMAIL_DATABASE_URL 或 DATABASE_URL，两者任填其一即可（前者优先）
       DATABASE_DRIVER: "postgres"
-      DATABASE_URL: "${HLOOLMAIL_DATABASE_URL}"
+      DATABASE_URL: "${HLOOLMAIL_DATABASE_URL:-${DATABASE_URL}}"
+      # Neon 免费版最大并发连接为 25，与此处默认值一致，无需修改
+      # 使用 Neon Pooler 连接串时可适当调大（最多 100）
       DB_MAX_OPEN_CONNS: "${DB_MAX_OPEN_CONNS:-25}"
       DB_MAX_IDLE_CONNS: "${DB_MAX_IDLE_CONNS:-5}"
 
