@@ -142,9 +142,34 @@ openssl rand -base64 32
 | `HLOOLMAIL_DEPLOYMENT` | 部署类型标识 | `docker` |
 | `CONFIG_ENV_PATH` | 兼容占位，无实际持久化 | `/tmp/.env` |
 
-**第三步：使用专用 Compose 文件**
+**第三步：构建镜像**
 
-在 DCDeploy 中选择 `docker-compose.dcdeploy.yml` 作为启动配置（该文件已移除所有本地卷挂载和内置 postgres 服务）。
+使用专用的 `Dockerfile.dcdeploy` 构建镜像，该文件已默认设置 `DATABASE_DRIVER=postgres`，移除了 `/app/storage` 本地目录创建，并内置了 `ca-certificates` 以支持 PostgreSQL TLS 连接：
+
+```bash
+docker build -f Dockerfile.dcdeploy -t hloolmail:latest .
+```
+
+推送到你的镜像仓库（如 Docker Hub、阿里云 ACR、GHCR 等）：
+
+```bash
+docker tag hloolmail:latest your-registry/hloolmail:latest
+docker push your-registry/hloolmail:latest
+```
+
+在 CI/CD 中构建时可注入版本信息：
+
+```bash
+docker build -f Dockerfile.dcdeploy \
+  --build-arg VERSION=1.0.0 \
+  --build-arg COMMIT=$(git rev-parse --short HEAD) \
+  --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  -t your-registry/hloolmail:1.0.0 .
+```
+
+**第四步：在 DCDeploy 配置镜像**
+
+在 DCDeploy 控制台中，使用 `docker-compose.dcdeploy.yml` 作为启动配置，并将 `image` 字段替换为你的镜像地址（该文件已移除所有本地卷挂载和内置 postgres 服务）。
 
 **第四步：完成安装**
 
@@ -163,7 +188,7 @@ openssl rand -base64 32
 
 **安装后刷新提示"未安装"**
 
-检查 `SESSION_SECRET` 和 `INBOX_TOKEN_SECRET` 是否已正确填入，且两个值均不少于 16 位。如填写后仍有问题，删除 admin 用户记录，重新走安装流程。
+检查 `SESSION_SECRET` 和 `INBOX_TOKEN_SECRET` 是否已正确填入，且两个值均不少于 16 位。如填写后仍有问题，删除 admin ���户记录，重新走安装流程。
 
 **数据库连接失败**
 
